@@ -1,5 +1,6 @@
 #include <SDL.h>
 #include <SDL_ttf.h>
+#include <SDL_mixer.h>
 #include <emscripten.h>
 #include <cstdlib>
 #include <ctime>
@@ -12,19 +13,33 @@ const int BORDER_SIZE = 5;
 static SDL_Window* window = nullptr;
 static SDL_Renderer* renderer = nullptr;
 static int ballDirectionX, ballDirectionY;
-static SDL_Rect playerPaddle = {10, HEIGHT / 2 - PADDLE_HEIGHT / 2, PADDLE_WIDTH, PADDLE_HEIGHT};
-static SDL_Rect opponentPaddle = {WIDTH - 20, HEIGHT / 2 - PADDLE_HEIGHT / 2, PADDLE_WIDTH, PADDLE_HEIGHT};
 static SDL_Rect ball = {WIDTH / 2, HEIGHT / 2, BALL_SIZE, BALL_SIZE};
 static TTF_Font* font = nullptr;
 static SDL_Color white = {255, 255, 255, 255};
+static Mix_Chunk* pongSound = nullptr;
 
 enum GameState { MENU, PVP, PVAI, PAUSED };
 GameState currentGameState = MENU;
 
-bool player1Moved = false;
-bool player2Moved = false;
-int playerScore = 0;
-int opponentScore = 0;
+char scoreText[100];
+
+// Define a struct for Player
+struct Player {
+    SDL_Rect paddle;
+    int score;
+    bool moved;
+    
+    Player(int x, int y) : score(0), moved(false) {
+        paddle.x = x;
+        paddle.y = y;
+        paddle.w = PADDLE_WIDTH;
+        paddle.h = PADDLE_HEIGHT;
+    }
+};
+
+// Create Player objects
+Player player(10, HEIGHT / 2 - PADDLE_HEIGHT / 2);
+Player opponent(WIDTH - 20, HEIGHT / 2 - PADDLE_HEIGHT / 2);
 
 SDL_Rect pvPButton = {WIDTH / 2 - 125, HEIGHT / 2, 250, 50};
 SDL_Rect pvAIButton = {WIDTH / 2 - 125, HEIGHT / 2 + 60, 250, 50};
@@ -105,6 +120,11 @@ void ResetBall() {
     ballDirectionX *= -1;  // Reverse direction after a point is scored.
 }
 
+void renderScore(Player& p, int positionFactor) {
+    sprintf(scoreText, "%d", p.score);
+    renderText(scoreText, white, WIDTH * positionFactor/4, 30);
+}
+
 void Render() {
     SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
     SDL_RenderClear(renderer);
@@ -113,18 +133,14 @@ void Render() {
         RenderMenu();
     } else {
         SDL_SetRenderDrawColor(renderer, 255, 255, 255, 255);
-
+        
         // Rendering scores
-        char scoreText[100];
-        sprintf(scoreText, "%d", playerScore);
-        renderText(scoreText, white, WIDTH * 1/4, 30);
-
-        sprintf(scoreText, "%d", opponentScore);
-        renderText(scoreText, white, WIDTH * 3/4, 30);
+        renderScore(player, 1);
+        renderScore(opponent, 3);
 
         RenderDottedLine();
-        SDL_RenderFillRect(renderer, &playerPaddle);
-        SDL_RenderFillRect(renderer, &opponentPaddle);
+        SDL_RenderFillRect(renderer, &player.paddle);
+        SDL_RenderFillRect(renderer, &opponent.paddle);
         SDL_RenderFillRect(renderer, &ball);
     }
     SDL_RenderPresent(renderer);
@@ -154,43 +170,35 @@ void Update() {
         const Uint8* keys = SDL_GetKeyboardState(NULL);
 
         // Player controls
-        if (keys[SDL_SCANCODE_UP] && playerPaddle.y > 0) {
-            playerPaddle.y -= PADDLE_SPEED;
-            player1Moved = true;
+        if (keys[SDL_SCANCODE_UP] && player.paddle.y > 0) {
+            player.paddle.y -= PADDLE_SPEED;
+            player.moved = true;
         }
-        if (keys[SDL_SCANCODE_DOWN] && playerPaddle.y < HEIGHT - PADDLE_HEIGHT) {
-            playerPaddle.y += PADDLE_SPEED;
-            player1Moved = true;
+        if (keys[SDL_SCANCODE_DOWN] && player.paddle.y < HEIGHT - PADDLE_HEIGHT) {
+            player.paddle.y += PADDLE_SPEED;
+            player.moved = true;
         }
-        // if (keys[SDL_SCANCODE_W] && opponentPaddle.y > 0) {
-        //     opponentPaddle.y -= PADDLE_SPEED;
-        //     player2Moved = true;
-        // }
-        // if (keys[SDL_SCANCODE_S] && opponentPaddle.y < HEIGHT - PADDLE_HEIGHT) {
-        //     opponentPaddle.y += PADDLE_SPEED;
-        //     player2Moved = true;
-        // }
 
         // Opponent controls
         if (currentGameState == PVP) {
-            if (keys[SDL_SCANCODE_W] && opponentPaddle.y > 0) {
-                opponentPaddle.y -= PADDLE_SPEED;
-                player2Moved = true;
+            if (keys[SDL_SCANCODE_W] && opponent.paddle.y > 0) {
+                opponent.paddle.y -= PADDLE_SPEED;
+                opponent.moved = true;
             }
-            if (keys[SDL_SCANCODE_S] && opponentPaddle.y < HEIGHT - PADDLE_HEIGHT) {
-                opponentPaddle.y += PADDLE_SPEED;
-                player2Moved = true;
+            if (keys[SDL_SCANCODE_S] && opponent.paddle.y < HEIGHT - PADDLE_HEIGHT) {
+                opponent.paddle.y += PADDLE_SPEED;
+                opponent.moved = true;
             }
         } else if (currentGameState == PVAI) {
             // Opponent AI - it will simply follow the ball's vertical position.
-            if (opponentPaddle.y + PADDLE_HEIGHT / 2 < ball.y) {
-                opponentPaddle.y += PADDLE_SPEED;
-            } else if (opponentPaddle.y + PADDLE_HEIGHT / 2 > ball.y) {
-                opponentPaddle.y -= PADDLE_SPEED;
+            if (opponent.paddle.y + PADDLE_HEIGHT / 2 < ball.y) {
+                opponent.paddle.y += PADDLE_SPEED;
+            } else if (opponent.paddle.y + PADDLE_HEIGHT / 2 > ball.y) {
+                opponent.paddle.y -= PADDLE_SPEED;
             }
         }
 
-        if ((currentGameState == PVP && player1Moved && player2Moved) || (currentGameState == PVAI && player1Moved)) {
+        if ((currentGameState == PVP && player.moved && opponent.moved) || (currentGameState == PVAI && player.moved)) {
             // Ball movement
             ball.x += ballDirectionX * BALL_SPEED;
             ball.y += ballDirectionY * BALL_SPEED;
@@ -201,19 +209,20 @@ void Update() {
             }
 
             // Ball collision with paddles
-            if ((ball.x <= playerPaddle.x + PADDLE_WIDTH && ball.y + BALL_SIZE >= playerPaddle.y && ball.y <= playerPaddle.y + PADDLE_HEIGHT) 
-            || (ball.x + BALL_SIZE >= opponentPaddle.x && ball.y + BALL_SIZE >= opponentPaddle.y && ball.y <= opponentPaddle.y + PADDLE_HEIGHT)) {
+            if ((ball.x <= player.paddle.x + PADDLE_WIDTH && ball.y + BALL_SIZE >= player.paddle.y && ball.y <= player.paddle.y + PADDLE_HEIGHT) 
+            || (ball.x + BALL_SIZE >= opponent.paddle.x && ball.y + BALL_SIZE >= opponent.paddle.y && ball.y <= opponent.paddle.y + PADDLE_HEIGHT)) {
                 ballDirectionX = -ballDirectionX;
+                Mix_PlayChannel(-1, pongSound, 0);  
             }
 
             // Check for points
             if (ball.x <= 0) {
                 // Opponent scores a point.
-                opponentScore++;
+                opponent.score++;
                 ResetBall();
             } else if (ball.x + BALL_SIZE >= WIDTH) {
                 // Player scores a point.
-                playerScore++;
+                player.score++;
                 ResetBall();
             }
         }
@@ -232,7 +241,13 @@ int main() {
 
     SDL_Init(SDL_INIT_VIDEO);
     window = SDL_CreateWindow("Jack's Pong Game", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, WIDTH, HEIGHT, SDL_WINDOW_SHOWN);
-    renderer = SDL_CreateRenderer(window, -1, 0);
+    renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_ACCELERATED);
+
+    if (Mix_OpenAudio(44100, MIX_DEFAULT_FORMAT, 2, 2048) < 0)
+    {
+        printf("SDL_mixer could not initialize! SDL_mixer Error: %s\n", Mix_GetError());
+        return 1;
+    }
 
     TTF_Init();
     font = TTF_OpenFont("assets/Inconsolata.ttf", 24);  // 24 is the font size
@@ -241,10 +256,18 @@ int main() {
         return 1;
     }
 
+    pongSound = Mix_LoadWAV("assets/pong.ogg");
+
+    if (pongSound == nullptr) {
+        printf("Failed to load sound: %s\n", Mix_GetError());
+        return 1;
+    }
+
     emscripten_set_main_loop(mainloop, 0, 1);
 
     // Cleanup before exiting
     TTF_CloseFont(font);
+    Mix_FreeChunk(pongSound);
     TTF_Quit();
     SDL_DestroyRenderer(renderer);
     SDL_DestroyWindow(window);
